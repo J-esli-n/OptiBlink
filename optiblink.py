@@ -303,6 +303,13 @@ import cv2
 import numpy as np
 import keyboard
 
+# Import splash screen module
+try:
+    from splash_screen import show_splash_screen_threaded, show_emergency_contact_dialog
+    SPLASH_AVAILABLE = True
+except ImportError:
+    SPLASH_AVAILABLE = False
+
 # Defer heavy imports until needed
 mp = None  # Will be imported when EyeTracker is created
 pygame = None  # Will be imported when TTS is first used
@@ -1002,7 +1009,13 @@ class EyeTracker:
         # Configuration
         self.config = load_config()
         # Cache the emergency contact number without spaces for quick use
-        self.emergency_contact = self.config.get("emergency_contact", "").replace(" ", "")
+        emergency_contact_raw = ""
+        if self.config and isinstance(self.config, dict):
+            emergency_contact_raw = self.config.get("emergency_contact", "")
+        if emergency_contact_raw:
+            self.emergency_contact = emergency_contact_raw.replace(" ", "")
+        else:
+            self.emergency_contact = ""
         
         # Call icon hover state
         self._icon_hovering = False
@@ -1642,6 +1655,39 @@ class EyeTracker:
         """Restore window to full opacity"""
         return self.set_window_transparency(window_name, 1.0)
 
+    def set_window_icon(self, window_name, ico_filename="optiblink-logo.ico"):
+        try:
+            if not WIN32_AVAILABLE:
+                return False
+            hwnd = win32gui.FindWindow(None, window_name)
+            if not hwnd:
+                return False
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p("OptiBlink"))
+            except Exception:
+                pass
+            ico_path = resource_path(ico_filename)
+            if not os.path.exists(ico_path):
+                return False
+            hicon_small = win32gui.LoadImage(0, ico_path, win32con.IMAGE_ICON, 0, 0,
+                                             win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE)
+            hicon_big = win32gui.LoadImage(0, ico_path, win32con.IMAGE_ICON, 0, 0,
+                                           win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE)
+            if hicon_small:
+                win32gui.SendMessage(hwnd, win32con.WM_SETICON, win32con.ICON_SMALL, hicon_small)
+            if hicon_big:
+                win32gui.SendMessage(hwnd, win32con.WM_SETICON, win32con.ICON_BIG, hicon_big)
+            try:
+                GCLP_HICON = -14
+                GCLP_HICONSM = -34
+                ctypes.windll.user32.SetClassLongPtrW(hwnd, GCLP_HICON, hicon_big)
+                ctypes.windll.user32.SetClassLongPtrW(hwnd, GCLP_HICONSM, hicon_small)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
     def draw_keyboard(self, width, height):
         """Draw a dynamic keyboard using OpenCV."""
         keyboard_img = np.zeros((height, width, 3), dtype=np.uint8)
@@ -1997,6 +2043,7 @@ class EyeTracker:
             pass
         
         return icon_bbox
+
 
     def detect_blink(self, left_ear, right_ear, left_area, right_area):
         avg_ear = (left_ear + right_ear) / 2.0
@@ -2611,6 +2658,43 @@ def prompt_phone_number_update():
 
 
 def main():
+    # Show splash screen first
+    if SPLASH_AVAILABLE:
+        try:
+            # Show splash screen (blocking, not threaded)
+            from splash_screen import show_splash_screen
+            show_splash_screen(duration=3.0)
+        except Exception as e:
+            print(f"Warning: Could not show splash screen: {e}")
+    
+    # Show emergency contact dialog ONLY on first run (when no config file exists)
+    try:
+        from splash_screen import show_emergency_contact_dialog
+    except Exception:
+        show_emergency_contact_dialog = None
+
+    try:
+        if show_emergency_contact_dialog and not os.path.exists(CONFIG_PATH):
+            contact_result = show_emergency_contact_dialog()
+            if contact_result:
+                print(f"Emergency contact configured: {contact_result['contact']}")
+                # Create and save initial config
+                initial_config = {
+                    'emergency_contact': contact_result['contact'],
+                    'prefer_whatsapp_web': contact_result['whatsapp_preference']
+                }
+                save_config(initial_config)
+            else:
+                print("Emergency contact setup was cancelled")
+                # Still create a config file to avoid showing the dialog next time
+                initial_config = {
+                    'emergency_contact': '',
+                    'prefer_whatsapp_web': False
+                }
+                save_config(initial_config)
+    except Exception as e:
+        print(f"Warning: First-run emergency contact dialog failed: {e}")
+    
     print("🚀 OptiBlink - Eye Tracking Morse Code Interface")
     print("=" * 50)
     
@@ -2721,6 +2805,10 @@ def main():
     global icon_bbox_global, keyboard_bbox_global, window_height_global, window_width_global, eye_tracker_global, video_height_global
     cv2.namedWindow(WINDOW_NAME)
     cv2.setMouseCallback(WINDOW_NAME, mouse_callback)
+    try:
+        eye_tracker._icon_set_success = eye_tracker.set_window_icon(WINDOW_NAME)
+    except Exception:
+        eye_tracker._icon_set_success = False
 
     try:
         while True:
@@ -2771,6 +2859,11 @@ def main():
             full_display_frame[0:video_height, 0:window_width] = processed_video_frame
             full_display_frame[video_height:video_height+keyboard_height, 0:window_width] = keyboard_img
             cv2.imshow(WINDOW_NAME, full_display_frame)
+            if not getattr(eye_tracker, '_icon_set_success', False):
+                try:
+                    eye_tracker._icon_set_success = eye_tracker.set_window_icon(WINDOW_NAME)
+                except Exception:
+                    eye_tracker._icon_set_success = False
             
             # Position window in top-right corner (only try for first few frames)
             if not window_positioned and position_attempts < max_position_attempts:
